@@ -31,7 +31,10 @@ func New(configPath string) *Clash {
 	return &Clash{configPath: configPath}
 }
 func (c *Clash) Start() {
-	maxprocs.Set(maxprocs.Logger(func(string, ...any) {}))
+	_, err := maxprocs.Set(maxprocs.Logger(func(string, ...any) {}))
+	if err != nil {
+		return
+	}
 	C.SetHomeDir(".")
 	if c.configPath != "" {
 		if !filepath.IsAbs(c.configPath) {
@@ -75,9 +78,15 @@ func (c *Clash) Proxies() []P {
 	all, _ := io.ReadAll(resp.Body)
 	m := make(map[string]interface{})
 	m2 := make(map[string]P)
-	json.Unmarshal(all, &m)
+	err := json.Unmarshal(all, &m)
+	if err != nil {
+		return nil
+	}
 	marshal, _ := json.Marshal(m["proxies"])
-	json.Unmarshal(marshal, &m2)
+	err1 := json.Unmarshal(marshal, &m2)
+	if err1 != nil {
+		return nil
+	}
 	ps := make([]P, 0)
 	for k := range m2 {
 		ps = append(ps, m2[k])
@@ -85,8 +94,8 @@ func (c *Clash) Proxies() []P {
 	return ps
 }
 func (c *Clash) Switchover(name string) {
-	json := fmt.Sprintf(`{"name":"%s"}`, name)
-	req, err := http.NewRequest(http.MethodPut, "http://127.0.0.1:9091/proxies/GLOBAL", bytes.NewBufferString(json))
+	jsonName := fmt.Sprintf(`{"name":"%s"}`, name)
+	req, err := http.NewRequest(http.MethodPut, "http://127.0.0.1:9091/proxies/GLOBAL", bytes.NewBufferString(jsonName))
 	if err != nil {
 		logs.Err(err)
 		return
