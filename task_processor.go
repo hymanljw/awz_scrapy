@@ -3,6 +3,7 @@ package main
 import (
 	"awesomeProject/proxy"
 	"fmt"
+	logs "github.com/danbai225/go-logs"
 	"log"
 	"net"
 	"net/url"
@@ -109,7 +110,7 @@ func ProcessingTask(task Task) string {
 }
 
 func createClient() *resty.Client {
-	clash := proxy.New("config.yaml")
+	clash := proxy.New("clash.yaml")
 	clash.Start()
 	// 创建代理URL
 	proxyURL, err := url.Parse("http://127.0.0.1:7890")
@@ -643,22 +644,79 @@ func IsGermanOrItalianSite() bool {
 
 // 主函数示例
 func main() {
-	// 示例任务
-	//task := Task{
-	//	TaskID:   "task123",
-	//	TaskType: "search_products",
-	//	Keyword:  "wireless headphones",
-	//	MaxPage:  2,
-	//	MinPage:  1,
-	//	Code:     "US",
+	// 在需要更新配置的地方调用
+	err := proxy.UpdateClashConfig()
+	if err != nil {
+		logs.Err("更新Clash配置失败: %v", err)
+	}
+
+	//// 定义命令行参数
+	//taskID := flag.String("id", "", "任务ID")
+	//taskType := flag.String("type", "search_products", "任务类型: search_products, asin_page, keyword_appear")
+	//keyword := flag.String("keyword", "", "搜索关键词")
+	//asin := flag.String("asin", "", "产品ASIN")
+	//category := flag.String("category", "", "产品类别")
+	//maxPage := flag.Int("max", 1, "最大页数")
+	//minPage := flag.Int("min", 1, "最小页数")
+	//code := flag.String("code", "US", "国家代码: US, DE, UK, CA, JP, FR, IT, ES, AU, MX, AE")
+	//
+	//// 解析命令行参数
+	//flag.Parse()
+	//
+	//// 验证必要参数
+	//if *taskID == "" {
+	//	fmt.Println("错误: 必须提供任务ID (--id)")
+	//	flag.Usage()
+	//	return
 	//}
 	//
-	//// 处理任务
-	//result := ProcessingTask(task)
-	//fmt.Println("Task result:", result)
-
-	task := Task{ASIN: "B09NNBBY8F"}
-	result := ASINPage(task)
+	//// 根据任务类型验证参数
+	//switch *taskType {
+	//case "search_products":
+	//	if *keyword == "" {
+	//		fmt.Println("错误: search_products 任务必须提供关键词 (--keyword)")
+	//		flag.Usage()
+	//		return
+	//	}
+	//case "asin_page":
+	//	if *asin == "" {
+	//		fmt.Println("错误: asin_page 任务必须提供ASIN (--asin)")
+	//		flag.Usage()
+	//		return
+	//	}
+	//case "keyword_appear":
+	//	if *keyword == "" || *asin == "" {
+	//		fmt.Println("错误: keyword_appear 任务必须提供关键词 (--keyword) 和 ASIN (--asin)")
+	//		flag.Usage()
+	//		return
+	//	}
+	//default:
+	//	fmt.Printf("错误: 不支持的任务类型: %s\n", *taskType)
+	//	flag.Usage()
+	//	return
+	//}
+	//
+	//// 创建任务
+	//task := Task{
+	//	TaskID:   *taskID,
+	//	TaskType: *taskType,
+	//	Keyword:  *keyword,
+	//	ASIN:     *asin,
+	//	Category: *category,
+	//	MaxPage:  *maxPage,
+	//	MinPage:  *minPage,
+	//	Code:     *code,
+	//}
+	task := Task{
+		TaskID:   "task123",
+		TaskType: "search_products",
+		Keyword:  "wireless headphones",
+		MaxPage:  2,
+		MinPage:  1,
+		Code:     "US",
+	}
+	// 处理任务
+	result := ProcessingTask(task)
 	fmt.Println("Task result:", result)
 }
 
