@@ -29,7 +29,7 @@ func init() {
 // UpdateClashConfig 从数据库获取Clash配置，转换后写入clash.yaml文件
 func UpdateClashConfig() error {
 	// 创建数据库连接
-	postgresDB, err := db.NewPostgresDB()
+	postgresDB, convHost, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
@@ -49,7 +49,7 @@ func UpdateClashConfig() error {
 
 	// 发送请求获取转换后的配置
 	resp, err := client.R().
-		Get(fmt.Sprintf("http://127.0.0.1:25500/sub?target=clash&url=%s", encodedConfig))
+		Get(fmt.Sprintf(convHost+":25500/sub?target=clash&url=%s", encodedConfig))
 
 	if err != nil {
 		return fmt.Errorf("请求转换服务失败: %v", err)

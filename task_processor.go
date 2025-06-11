@@ -1,9 +1,14 @@
 package main
 
 import (
+	"awesomeProject/db"
 	"awesomeProject/proxy"
+	"context"
+	"flag"
 	"fmt"
 	logs "github.com/danbai225/go-logs"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"log"
 	"net"
 	"net/url"
@@ -99,14 +104,26 @@ var (
 func ProcessingTask(task Task) string {
 	switch task.TaskType {
 	case "search_products":
-		return SearchProducts(task)
+		// 搜索产品
+		task.Result = SearchProducts(task)
+		task.Status = "done"
+
+		// 保存结果到MongoDB
+		err := SaveResultsToMongoDB(task.Result, task.TaskID)
+		if err != nil {
+			logs.Err("保存结果到MongoDB失败: %v", err)
+		}
+
 	case "asin_page":
-		return ASINPage(task)
+		// 处理ASIN页面
+		task.Status = ASINPage(task)
 	case "keyword_appear":
-		return KeywordAppear(task)
+		// 检查关键词出现
+		task.Status = KeywordAppear(task)
 	default:
 		return ""
 	}
+	return task.Status
 }
 
 func createClient() *resty.Client {
@@ -138,7 +155,7 @@ func createClient() *resty.Client {
 }
 
 // SearchProducts 处理搜索产品任务
-func SearchProducts(task Task) string {
+func SearchProducts(task Task) []Product {
 	var mu sync.Mutex
 
 	kw := task.Keyword
@@ -278,6 +295,7 @@ func SearchProducts(task Task) string {
 	// 更新任务状态
 	task.Result = allResults
 	if len(allResults) > 0 {
+		fmt.Println(allResults)
 		task.Status = "success"
 	} else {
 		task.Status = "error"
@@ -299,7 +317,7 @@ func SearchProducts(task Task) string {
 	// 清理任务
 	//PopHandlingTask()
 
-	return task.Status
+	return allResults
 }
 
 // ScrapePageProds 解析页面中的产品信息
@@ -650,71 +668,71 @@ func main() {
 		logs.Err("更新Clash配置失败: %v", err)
 	}
 
-	//// 定义命令行参数
-	//taskID := flag.String("id", "", "任务ID")
-	//taskType := flag.String("type", "search_products", "任务类型: search_products, asin_page, keyword_appear")
-	//keyword := flag.String("keyword", "", "搜索关键词")
-	//asin := flag.String("asin", "", "产品ASIN")
-	//category := flag.String("category", "", "产品类别")
-	//maxPage := flag.Int("max", 1, "最大页数")
-	//minPage := flag.Int("min", 1, "最小页数")
-	//code := flag.String("code", "US", "国家代码: US, DE, UK, CA, JP, FR, IT, ES, AU, MX, AE")
-	//
-	//// 解析命令行参数
-	//flag.Parse()
-	//
-	//// 验证必要参数
-	//if *taskID == "" {
-	//	fmt.Println("错误: 必须提供任务ID (--id)")
-	//	flag.Usage()
-	//	return
-	//}
-	//
-	//// 根据任务类型验证参数
-	//switch *taskType {
-	//case "search_products":
-	//	if *keyword == "" {
-	//		fmt.Println("错误: search_products 任务必须提供关键词 (--keyword)")
-	//		flag.Usage()
-	//		return
-	//	}
-	//case "asin_page":
-	//	if *asin == "" {
-	//		fmt.Println("错误: asin_page 任务必须提供ASIN (--asin)")
-	//		flag.Usage()
-	//		return
-	//	}
-	//case "keyword_appear":
-	//	if *keyword == "" || *asin == "" {
-	//		fmt.Println("错误: keyword_appear 任务必须提供关键词 (--keyword) 和 ASIN (--asin)")
-	//		flag.Usage()
-	//		return
-	//	}
-	//default:
-	//	fmt.Printf("错误: 不支持的任务类型: %s\n", *taskType)
-	//	flag.Usage()
-	//	return
-	//}
-	//
-	//// 创建任务
-	//task := Task{
-	//	TaskID:   *taskID,
-	//	TaskType: *taskType,
-	//	Keyword:  *keyword,
-	//	ASIN:     *asin,
-	//	Category: *category,
-	//	MaxPage:  *maxPage,
-	//	MinPage:  *minPage,
-	//	Code:     *code,
-	//}
-	task := Task{
-		TaskID:   "task123",
-		TaskType: "search_products",
-		Keyword:  "wireless headphones",
-		MaxPage:  2,
-		MinPage:  1,
-		Code:     "US",
+	// 定义命令行参数
+	taskID := flag.String("id", "", "任务ID")
+	taskType := flag.String("type", "search_products", "任务类型: search_products, asin_page, keyword_appear")
+	keyword := flag.String("keyword", "", "搜索关键词")
+	asin := flag.String("asin", "", "产品ASIN")
+	category := flag.String("category", "", "产品类别")
+	maxPage := flag.Int("max", 1, "最大页数")
+	minPage := flag.Int("min", 1, "最小页数")
+	code := flag.String("code", "US", "国家代码: US, DE, UK, CA, JP, FR, IT, ES, AU, MX, AE")
+
+	// 解析命令行参数
+	flag.Parse()
+
+	// 验证必要参数
+	if *taskID == "" {
+		fmt.Println("错误: 必须提供任务ID (--id)")
+		flag.Usage()
+		return
 	}
+
+	// 根据任务类型验证参数
+	switch *taskType {
+	case "search_products":
+		if *keyword == "" {
+			fmt.Println("错误: search_products 任务必须提供关键词 (--keyword)")
+			flag.Usage()
+			return
+		}
+	case "asin_page":
+		if *asin == "" {
+			fmt.Println("错误: asin_page 任务必须提供ASIN (--asin)")
+			flag.Usage()
+			return
+		}
+	case "keyword_appear":
+		if *keyword == "" || *asin == "" {
+			fmt.Println("错误: keyword_appear 任务必须提供关键词 (--keyword) 和 ASIN (--asin)")
+			flag.Usage()
+			return
+		}
+	default:
+		fmt.Printf("错误: 不支持的任务类型: %s\n", *taskType)
+		flag.Usage()
+		return
+	}
+
+	// 创建任务
+	task := Task{
+		TaskID:   *taskID,
+		TaskType: *taskType,
+		Keyword:  *keyword,
+		ASIN:     *asin,
+		Category: *category,
+		MaxPage:  *maxPage,
+		MinPage:  *minPage,
+		Code:     *code,
+	}
+	//task := Task{
+	//	TaskID:   "task123",
+	//	TaskType: "search_products",
+	//	Keyword:  "wireless headphones",
+	//	MaxPage:  2,
+	//	MinPage:  1,
+	//	Code:     "US",
+	//}
 	// 处理任务
 	result := ProcessingTask(task)
 	fmt.Println("Task result:", result)
@@ -726,4 +744,152 @@ func GetAmazonDomain(code string) string {
 		return domain
 	}
 	return "amazon.com" // 默认返回美国站点
+}
+
+// MongoProduct 表示MongoDB中的产品格式
+type MongoProduct struct {
+	Position     MongoPosition `json:"position" bson:"position"`
+	Price        MongoPrice    `json:"price" bson:"price"`
+	Reviews      MongoReviews  `json:"reviews" bson:"reviews"`
+	AmazonPrime  bool          `json:"amazon_prime" bson:"amazon_prime"`
+	Title        string        `json:"title" bson:"title"`
+	CreatedAt    time.Time     `json:"created_at" bson:"created_at"`
+	ASIN         string        `json:"asin" bson:"asin"`
+	URL          string        `json:"url" bson:"url"`
+	Sponsored    bool          `json:"sponsored" bson:"sponsored"`
+	AmazonChoice bool          `json:"amazon_choice" bson:"amazon_choice"`
+	BestSeller   bool          `json:"best_seller" bson:"best_seller"`
+	Thumbnail    string        `json:"thumbnail" bson:"thumbnail"`
+}
+
+// MongoPosition 表示MongoDB中的位置信息
+type MongoPosition struct {
+	Page           int `json:"page" bson:"page"`
+	Position       int `json:"position" bson:"position"`
+	GlobalPosition int `json:"global_position" bson:"global_position"`
+}
+
+// MongoPrice 表示MongoDB中的价格信息
+type MongoPrice struct {
+	Discounted   bool     `json:"discounted" bson:"discounted"`
+	CurrentPrice float64  `json:"current_price" bson:"current_price"`
+	BeforePrice  *float64 `json:"before_price" bson:"before_price"`
+}
+
+// MongoReviews 表示MongoDB中的评论信息
+type MongoReviews struct {
+	Rating       float64 `json:"rating" bson:"rating"`
+	TotalReviews int     `json:"total_reviews" bson:"total_reviews"`
+}
+
+// SaveResultsToMongoDB 将结果保存到MongoDB
+func SaveResultsToMongoDB(products []Product, taskID string) error {
+	// 创建数据库连接
+	postgresDB, _, err := db.NewPostgresDB()
+	if err != nil {
+		return fmt.Errorf("创建数据库连接失败: %v", err)
+	}
+	defer postgresDB.Close()
+
+	// 从数据库获取MongoDB连接字符串
+	mongoURL, err := postgresDB.GetMongoConfig()
+	if err != nil {
+		return fmt.Errorf("获取MongoDB连接字符串失败: %v", err)
+	}
+	fmt.Println("<UNK>MongoDB<UNK>:", mongoURL)
+	// 创建MongoDB客户端
+	clientOptions := options.Client().ApplyURI(mongoURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := mongo.Connect(ctx, clientOptions)
+	if err != nil {
+		return fmt.Errorf("连接MongoDB失败: %v", err)
+	}
+	defer func() {
+		if err := client.Disconnect(ctx); err != nil {
+			logs.Err("断开MongoDB连接失败: %v", err)
+		}
+	}()
+
+	// 检查连接
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("MongoDB连接测试失败: %v", err)
+	}
+
+	// 获取数据库和集合
+	// 从连接字符串中提取数据库名称
+	databaseName := extractDatabaseName(mongoURL)
+	if databaseName == "" {
+		databaseName = "amazon_scraper" // 默认数据库名
+	}
+
+	database := client.Database(databaseName)
+	collection := database.Collection(taskID)
+
+	// 转换产品格式并插入数据库
+	var mongoProducts []interface{}
+	for _, product := range products {
+		// 处理BeforePrice为null的情况
+		var beforePrice *float64
+		if product.Price.BeforePrice > 0 {
+			bp := product.Price.BeforePrice
+			beforePrice = &bp
+		}
+
+		mongoProduct := MongoProduct{
+			Position: MongoPosition{
+				Page:           product.Position.Page,
+				Position:       product.Position.Position,
+				GlobalPosition: product.Position.GlobalPosition,
+			},
+			Price: MongoPrice{
+				Discounted:   product.Price.Discounted,
+				CurrentPrice: product.Price.CurrentPrice,
+				BeforePrice:  beforePrice,
+			},
+			Reviews: MongoReviews{
+				Rating:       product.Reviews.Rating,
+				TotalReviews: product.Reviews.TotalReviews,
+			},
+			AmazonPrime:  product.AmazonPrime,
+			Title:        product.Title,
+			CreatedAt:    time.Now(),
+			ASIN:         product.ASIN,
+			URL:          product.URL,
+			Sponsored:    product.Sponsored,
+			AmazonChoice: product.AmazonChoice,
+			BestSeller:   product.BestSeller,
+			Thumbnail:    product.Thumbnail,
+		}
+
+		mongoProducts = append(mongoProducts, mongoProduct)
+	}
+
+	// 插入数据
+	if len(mongoProducts) > 0 {
+		_, err = collection.InsertMany(ctx, mongoProducts)
+		if err != nil {
+			return fmt.Errorf("插入数据到MongoDB失败: %v", err)
+		}
+		logs.Info("成功将%d条产品数据保存到MongoDB集合%s", len(mongoProducts), taskID)
+	}
+
+	return nil
+}
+
+// extractDatabaseName 从MongoDB连接字符串中提取数据库名称
+func extractDatabaseName(mongoURL string) string {
+	// 简单解析MongoDB连接字符串，提取数据库名
+	parts := strings.Split(mongoURL, "/")
+	if len(parts) > 0 {
+		lastPart := parts[len(parts)-1]
+		// 处理可能包含参数的情况
+		if strings.Contains(lastPart, "?") {
+			return strings.Split(lastPart, "?")[0]
+		}
+		return lastPart
+	}
+	return ""
 }
