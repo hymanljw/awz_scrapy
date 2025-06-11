@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	logs "github.com/danbai225/go-logs"
+	"github.com/go-resty/resty/v2"
 	"github.com/moshaoli688/clash/config"
 	C "github.com/moshaoli688/clash/constant"
 	"github.com/moshaoli688/clash/hub"
@@ -17,10 +18,64 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"awesomeProject/db"
 )
 
 func init() {
 	rand.NewSource(time.Now().UnixNano())
+}
+
+// UpdateClashConfig 从数据库获取Clash配置，转换后写入clash.yaml文件
+func UpdateClashConfig() error {
+	// 创建数据库连接
+	postgresDB, convHost, err := db.NewPostgresDB()
+	if err != nil {
+		return fmt.Errorf("创建数据库连接失败: %v", err)
+	}
+	defer postgresDB.Close()
+
+	// 获取clash配置
+	clashConfig, err := postgresDB.GetClashConfig()
+	if err != nil {
+		return fmt.Errorf("获取clash配置失败: %v", err)
+	}
+
+	// URL编码配置
+	encodedConfig := url.QueryEscape(clashConfig)
+
+	// 创建resty客户端
+	client := resty.New()
+
+	// 发送请求获取转换后的配置
+	resp, err := client.R().
+		Get(fmt.Sprintf(convHost+":25500/sub?target=clash&url=%s", encodedConfig))
+
+	if err != nil {
+		return fmt.Errorf("请求转换服务失败: %v", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		return fmt.Errorf("转换服务返回错误状态码: %d", resp.StatusCode())
+	}
+
+	// 获取当前工作目录
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("获取工作目录失败: %v", err)
+	}
+
+	// 构建clash.yaml文件路径
+	clashYamlPath := filepath.Join(wd, "clash.yaml")
+
+	// 写入文件
+	err = os.WriteFile(clashYamlPath, resp.Body(), 0644)
+	if err != nil {
+		return fmt.Errorf("写入clash.yaml文件失败: %v", err)
+	}
+
+	logs.Info("成功更新clash.yaml配置文件")
+	return nil
 }
 
 type Clash struct {
