@@ -4,14 +4,19 @@ import (
 	"awesomeProject/db"
 	"awesomeProject/proxy"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	logs "github.com/danbai225/go-logs"
+	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"log"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,6 +42,7 @@ type Task struct {
 	Appear           string      `json:"appear"`
 	TotalResultCount int         `json:"total_result_count"`
 	Code             string      `json:"code"`
+	ZipCode          string      `json:"zip_code"`
 }
 
 // Position 表示产品在搜索结果中的位置
@@ -93,14 +99,28 @@ var (
 		"ES": "amazon.es",
 		"AU": "amazon.com.au",
 		"MX": "amazon.com.mx",
-		"AE": "amazon.ae",
+	}
+
+	// Amazon默认邮编映射
+	amazonZipCodes = map[string]string{
+		"US": "10001",    // 纽约
+		"DE": "10115",    // 柏林
+		"UK": "SW1A 1AA", // 伦敦
+		"CA": "M5V 2A8",  // 多伦多
+		"JP": "100-0001", // 东京
+		"FR": "75001",    // 巴黎
+		"IT": "00100",    // 罗马
+		"ES": "28001",    // 马德里
+		"AU": "2000",     // 悉尼
+		"MX": "06000",    // 墨西哥城
+		"AE": "00000",    // 迪拜
 	}
 
 	// 当前任务的code
 	currentTaskCode string
 )
 
-// 处理任务的主函数
+// ProcessingTask 处理任务的主函数
 func ProcessingTask(task Task) string {
 	switch task.TaskType {
 	case "search_products":
@@ -108,10 +128,33 @@ func ProcessingTask(task Task) string {
 		task.Result = SearchProducts(task)
 		task.Status = "done"
 
-		// 保存结果到MongoDB
-		err := SaveResultsToMongoDB(task.Result, task.TaskID)
+		// 获取当前工作目录
+		wd, err := os.Getwd()
 		if err != nil {
-			logs.Err("保存结果到MongoDB失败: %v", err)
+			return "获取工作目录失败"
+		}
+		// 加载.env文件
+		envPath := filepath.Join(wd, ".env")
+		err = godotenv.Load(envPath)
+		if err != nil {
+			return "加载.env文件失败"
+		}
+
+		// 根据环境变量决定保存结果的方式
+		resultType := os.Getenv("RESULT_TYPE")
+		fmt.Println("根据环境变量决定保存结果的方式" + resultType)
+		if resultType == "redis" {
+			// 保存结果到Redis队列
+			err1 := SaveResultsToRedis(&task)
+			if err1 != nil {
+				logs.Err("保存结果到Redis失败: %v", err1)
+			}
+		} else if resultType == "mongo" || resultType == "" {
+			// 保存结果到MongoDB
+			err2 := SaveResultsToMongoDB(task.Result, task.TaskID)
+			if err2 != nil {
+				logs.Err("保存结果到MongoDB失败: %v", err2)
+			}
 		}
 
 	case "asin_page":
@@ -179,6 +222,25 @@ func SearchProducts(task Task) []Product {
 	// 设置当前任务的code
 	currentTaskCode = task.Code
 	amazonDomain := GetAmazonDomain(currentTaskCode)
+
+	// 如果设置了邮编，先设置亚马逊的邮编
+	zipCode := ""
+	if task.ZipCode != "" {
+		zipCode = task.ZipCode
+	} else if task.Code != "" {
+		// 如果没有设置邮编但设置了国家代码，使用对应国家的默认邮编
+		zipCode = GetAmazonZipCode(task.Code)
+	}
+
+	if zipCode != "" {
+		err := SetAmazonZipCode(client, amazonDomain, zipCode)
+		if err != nil {
+			logs.Warn("设置亚马逊邮编失败:", err)
+			// 即使设置邮编失败，我们仍然继续爬取
+		} else {
+			logs.Info("成功设置亚马逊邮编:", zipCode)
+		}
+	}
 
 	allResults := []Product{}
 	currentPage := minPage
@@ -496,6 +558,26 @@ func ASINPage(task Task) string {
 		// 获取对应的Amazon域名
 		amazonDomain := GetAmazonDomain(task.Code)
 
+		// 如果设置了邮编，先设置亚马逊的邮编
+		zipCode := ""
+		if task.ZipCode != "" {
+			zipCode = task.ZipCode
+		} else if task.Code != "" {
+			// 如果没有设置邮编但设置了国家代码，使用对应国家的默认邮编
+			zipCode = GetAmazonZipCode(task.Code)
+		}
+
+		if zipCode != "" {
+			err := SetAmazonZipCode(client, amazonDomain, zipCode)
+			if err != nil {
+				logs.Warn("设置亚马逊邮编失败:", err)
+				// 即使设置邮编失败，我们仍然继续爬取
+			} else {
+				logs.Info("成功设置亚马逊邮编:", zipCode)
+			}
+		}
+
+		// 构建ASIN页面URL
 		asinURL := fmt.Sprintf("https://www.%s/dp/%s", amazonDomain, task.ASIN)
 		headers := map[string]string{
 			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -662,21 +744,25 @@ func IsGermanOrItalianSite() bool {
 
 // 主函数示例
 func main() {
+	if main1() {
+		return
+	}
 	// 在需要更新配置的地方调用
 	err := proxy.UpdateClashConfig()
 	if err != nil {
 		logs.Err("更新Clash配置失败: %v", err)
 	}
 
-	// 定义命令行参数
+	// 解析命令行参数
 	taskID := flag.String("id", "", "任务ID")
-	taskType := flag.String("type", "search_products", "任务类型: search_products, asin_page, keyword_appear")
+	taskType := flag.String("type", "", "任务类型: search_products, asin_page, keyword_appear")
 	keyword := flag.String("keyword", "", "搜索关键词")
 	asin := flag.String("asin", "", "产品ASIN")
 	category := flag.String("category", "", "产品类别")
 	maxPage := flag.Int("max", 1, "最大页数")
 	minPage := flag.Int("min", 1, "最小页数")
 	code := flag.String("code", "US", "国家代码: US, DE, UK, CA, JP, FR, IT, ES, AU, MX, AE")
+	zipCode := flag.String("zipcode", "", "邮政编码，用于设置亚马逊配送地址")
 
 	// 解析命令行参数
 	flag.Parse()
@@ -724,18 +810,31 @@ func main() {
 		MaxPage:  *maxPage,
 		MinPage:  *minPage,
 		Code:     *code,
+		ZipCode:  *zipCode,
 	}
-	//task := Task{
-	//	TaskID:   "task123",
-	//	TaskType: "search_products",
-	//	Keyword:  "wireless headphones",
-	//	MaxPage:  2,
-	//	MinPage:  1,
-	//	Code:     "US",
-	//}
+
 	// 处理任务
 	result := ProcessingTask(task)
 	fmt.Println("Task result:", result)
+}
+func main1() bool {
+	//err := proxy.UpdateClashConfig()
+	//if err != nil {
+	//	logs.Err("更新Clash配置失败: %v", err)
+	//}
+	task := Task{
+		TaskID:   "task123",
+		TaskType: "search_products",
+		Keyword:  "wireless headphones",
+		MaxPage:  1,
+		MinPage:  1,
+		Code:     "US",
+		Category: "aps",
+	}
+	// 处理任务
+	result := ProcessingTask(task)
+	fmt.Println("Task result:", result)
+	return true
 }
 
 // GetAmazonDomain 根据code获取对应的Amazon域名
@@ -744,6 +843,52 @@ func GetAmazonDomain(code string) string {
 		return domain
 	}
 	return "amazon.com" // 默认返回美国站点
+}
+
+// GetAmazonZipCode 根据国家代码获取对应的默认邮编
+func GetAmazonZipCode(countryCode string) string {
+	if zipCode, ok := amazonZipCodes[countryCode]; ok {
+		return zipCode
+	}
+	return "10001" // 默认返回美国纽约邮编
+}
+
+// SetAmazonZipCode 设置亚马逊的邮编
+func SetAmazonZipCode(client *resty.Client, amazonDomain string, zipCode string) error {
+	if zipCode == "" {
+		return nil // 如果没有设置邮编，直接返回
+	}
+
+	// 构建地址更改URL
+	addressChangeURL := fmt.Sprintf("https://www.%s/gp/delivery/ajax/address-change.html", amazonDomain)
+
+	// 构建表单数据
+	formData := map[string]string{
+		"locationType": "LOCATION_INPUT",
+		"zipCode":      zipCode,
+		"storeContext": "generic",
+		"deviceType":   "web",
+		"pageType":     "Gateway",
+		"actionSource": "glow",
+	}
+
+	// 发送POST请求设置邮编
+	resp, err := client.R().
+		SetFormData(formData).
+		SetHeader("Content-Type", "application/x-www-form-urlencoded").
+		SetHeader("Accept", "text/html,*/*").
+		SetHeader("X-Requested-With", "XMLHttpRequest").
+		Post(addressChangeURL)
+
+	if err != nil {
+		return fmt.Errorf("设置邮编失败: %v", err)
+	}
+
+	if resp.StatusCode() != 200 {
+		return fmt.Errorf("设置邮编请求返回非200状态码: %d", resp.StatusCode())
+	}
+
+	return nil
 }
 
 // MongoProduct 表示MongoDB中的产品格式
@@ -760,6 +905,7 @@ type MongoProduct struct {
 	AmazonChoice bool          `json:"amazon_choice" bson:"amazon_choice"`
 	BestSeller   bool          `json:"best_seller" bson:"best_seller"`
 	Thumbnail    string        `json:"thumbnail" bson:"thumbnail"`
+	TaskID       string        `json:"task_id" bson:"task_id"`
 }
 
 // MongoPosition 表示MongoDB中的位置信息
@@ -892,4 +1038,146 @@ func extractDatabaseName(mongoURL string) string {
 		return lastPart
 	}
 	return ""
+}
+
+// SaveResultsToRedis 将结果保存到Redis队列
+// 新的Redis结果格式，匹配sample.json的格式
+type RedisResult struct {
+	TaskID        interface{} `json:"task_id"`
+	Country       string      `json:"country"`
+	MaxPage       int         `json:"max_page"`
+	Category      string      `json:"category"`
+	TaskType      string      `json:"task_type"`
+	Brand         string      `json:"brand"`
+	ASIN          string      `json:"asin"`
+	ParseType     string      `json:"parse_type"`
+	Postcode      string      `json:"postcode"`
+	TaskKey       string      `json:"task_key"`
+	QueueKey      string      `json:"queue_key"`
+	Keyword       string      `json:"keyword"`
+	TotalProducts interface{} `json:"total_products"`
+	Result        []Product   `json:"result"`
+}
+
+func SaveResultsToRedis(task *Task) error {
+	// 创建数据库连接
+	postgresDB, _, err := db.NewPostgresDB()
+	if err != nil {
+		return fmt.Errorf("创建数据库连接失败: %v", err)
+	}
+	defer postgresDB.Close()
+
+	// 从数据库获取Redis连接字符串
+	redisURL, err := postgresDB.GetRedisConfig()
+	if err != nil {
+		return fmt.Errorf("获取Redis连接字符串失败: %v", err)
+	}
+
+	// 创建Redis客户端
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return fmt.Errorf("解析Redis连接字符串失败: %v", err)
+	}
+
+	// 确保认证信息正确设置
+	// 如果连接字符串中包含用户名和密码，但ParseURL没有正确解析，手动设置
+	if opts.Password == "" && strings.Contains(redisURL, "@") {
+		fmt.Printf("原始Redis连接字符串: %s\n", redisURL)
+		fmt.Printf("ParseURL后的选项: Username=%s, Password=%s\n", opts.Username, opts.Password)
+
+		// 尝试从URL中提取认证信息
+		parts := strings.Split(redisURL, "@")
+		if len(parts) >= 2 {
+			protocolParts := strings.Split(parts[0], "://")
+			if len(protocolParts) >= 2 {
+				auth := protocolParts[1]
+				if strings.Contains(auth, ":") {
+					// 格式: username:password
+					credentials := strings.Split(auth, ":")
+					if len(credentials) == 2 {
+						opts.Username = credentials[0]
+						opts.Password = credentials[1]
+					}
+				} else {
+					// 格式: redis://username@host:port/db
+					// 在这种情况下，username就是密码
+					opts.Password = auth
+					fmt.Printf("设置密码为: %s\n", auth)
+				}
+			}
+		}
+	}
+
+	client := redis.NewClient(opts)
+	ctx := context.Background()
+
+	// 检查连接
+	_, err = client.Ping(ctx).Result()
+	if err != nil {
+		return fmt.Errorf("Redis连接测试失败: %v", err)
+	}
+	defer func(client *redis.Client) {
+		errClose := client.Close()
+		if errClose != nil {
+
+		}
+	}(client)
+
+	// 获取Redis队列名称
+	queueName := os.Getenv("REDIS_QUEUE")
+	if queueName == "" {
+		queueName = "amazon:scraper_task_results" // 默认队列名
+	}
+	fmt.Println("<UNK>Redis<UNK>:", queueName)
+	// 创建新的Redis结果格式
+	// 获取任务相关信息
+	taskIDValue := task.TaskID
+
+	// 确定parseType
+	parseType := "product_shares"
+	if task.TaskType != "search_products" {
+		parseType = task.TaskType
+	}
+
+	// 构建task_key和queue_key
+	taskKey := fmt.Sprintf("ads_assembler:amz_scraper_task_%s", task.TaskID)
+	queueKey := fmt.Sprintf("amazon:scraper_execute_tasks:%s", task.Code)
+
+	// 创建Redis结果对象
+	redisResult := RedisResult{
+		TaskID:    taskIDValue,
+		Country:   task.Code,
+		MaxPage:   task.MaxPage,
+		Category:  task.Category,
+		TaskType:  task.TaskType,
+		Brand:     "",
+		ASIN:      task.ASIN,
+		ParseType: parseType,
+		Postcode: func() string {
+			if task.ZipCode != "" {
+				return task.ZipCode
+			}
+			return GetAmazonZipCode(task.Code)
+		}(),
+		TaskKey:       taskKey,
+		QueueKey:      queueKey,
+		Keyword:       task.Keyword,
+		TotalProducts: len(task.Result),
+		Result:        task.Result,
+	}
+
+	// 转换为JSON
+	jsonData, err := json.Marshal(redisResult)
+	if err != nil {
+		return fmt.Errorf("转换Redis结果为JSON失败: %v", err)
+	}
+
+	// 添加到Redis队列
+	err = client.RPush(ctx, queueName, jsonData).Err()
+	if err != nil {
+		return fmt.Errorf("添加数据到Redis队列失败: %v", err)
+	}
+
+	logs.Info("成功将%d条产品数据保存到Redis队列%s", len(task.Result), queueName)
+	return nil
 }

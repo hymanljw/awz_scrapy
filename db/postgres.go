@@ -78,6 +78,20 @@ func (db *PostgresDB) GetMongoConfig() (string, error) {
 	return values, nil
 }
 
+// GetRedisConfig 查询configs表中type="redis"的记录，返回values
+func (db *PostgresDB) GetRedisConfig() (string, error) {
+	var values string
+
+	// 执行查询
+	query := "SELECT values FROM configs WHERE type = $1"
+	err := db.pool.QueryRow(context.Background(), query, "redis").Scan(&values)
+	if err != nil {
+		return "", fmt.Errorf("查询redis配置失败: %v", err)
+	}
+
+	return values, nil
+}
+
 // ExampleUsage 示例使用方法
 func ExampleUsage() {
 	// 创建数据库连接
