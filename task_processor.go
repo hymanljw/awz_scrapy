@@ -4,14 +4,19 @@ import (
 	"awesomeProject/db"
 	"awesomeProject/proxy"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	logs "github.com/danbai225/go-logs"
+	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"log"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -100,7 +105,7 @@ var (
 	currentTaskCode string
 )
 
-// 处理任务的主函数
+// ProcessingTask 处理任务的主函数
 func ProcessingTask(task Task) string {
 	switch task.TaskType {
 	case "search_products":
@@ -108,10 +113,33 @@ func ProcessingTask(task Task) string {
 		task.Result = SearchProducts(task)
 		task.Status = "done"
 
-		// 保存结果到MongoDB
-		err := SaveResultsToMongoDB(task.Result, task.TaskID)
+		// 获取当前工作目录
+		wd, err := os.Getwd()
 		if err != nil {
-			logs.Err("保存结果到MongoDB失败: %v", err)
+			return "获取工作目录失败"
+		}
+		// 加载.env文件
+		envPath := filepath.Join(wd, ".env")
+		err = godotenv.Load(envPath)
+		if err != nil {
+			return "加载.env文件失败"
+		}
+
+		// 根据环境变量决定保存结果的方式
+		resultType := os.Getenv("RESULT_TYPE")
+		fmt.Println("根据环境变量决定保存结果的方式" + resultType)
+		if resultType == "redis" {
+			// 保存结果到Redis队列
+			err1 := SaveResultsToRedis(task.Result, task.TaskID)
+			if err1 != nil {
+				logs.Err("保存结果到Redis失败: %v", err1)
+			}
+		} else if resultType == "mongo" || resultType == "" {
+			// 保存结果到MongoDB
+			err2 := SaveResultsToMongoDB(task.Result, task.TaskID)
+			if err2 != nil {
+				logs.Err("保存结果到MongoDB失败: %v", err2)
+			}
 		}
 
 	case "asin_page":
@@ -662,6 +690,9 @@ func IsGermanOrItalianSite() bool {
 
 // 主函数示例
 func main() {
+	if main1() {
+		return
+	}
 	// 在需要更新配置的地方调用
 	err := proxy.UpdateClashConfig()
 	if err != nil {
@@ -737,6 +768,24 @@ func main() {
 	result := ProcessingTask(task)
 	fmt.Println("Task result:", result)
 }
+func main1() bool {
+	//err := proxy.UpdateClashConfig()
+	//if err != nil {
+	//	logs.Err("更新Clash配置失败: %v", err)
+	//}
+	task := Task{
+		TaskID:   "task123",
+		TaskType: "search_products",
+		Keyword:  "wireless headphones",
+		MaxPage:  1,
+		MinPage:  1,
+		Code:     "US",
+	}
+	// 处理任务
+	result := ProcessingTask(task)
+	fmt.Println("Task result:", result)
+	return true
+}
 
 // GetAmazonDomain 根据code获取对应的Amazon域名
 func GetAmazonDomain(code string) string {
@@ -760,6 +809,7 @@ type MongoProduct struct {
 	AmazonChoice bool          `json:"amazon_choice" bson:"amazon_choice"`
 	BestSeller   bool          `json:"best_seller" bson:"best_seller"`
 	Thumbnail    string        `json:"thumbnail" bson:"thumbnail"`
+	TaskID       string        `json:"task_id" bson:"task_id"`
 }
 
 // MongoPosition 表示MongoDB中的位置信息
@@ -892,4 +942,129 @@ func extractDatabaseName(mongoURL string) string {
 		return lastPart
 	}
 	return ""
+}
+
+// SaveResultsToRedis 将结果保存到Redis队列
+func SaveResultsToRedis(products []Product, taskID string) error {
+	// 创建数据库连接
+	postgresDB, _, err := db.NewPostgresDB()
+	if err != nil {
+		return fmt.Errorf("创建数据库连接失败: %v", err)
+	}
+	defer postgresDB.Close()
+
+	// 从数据库获取Redis连接字符串
+	redisURL, err := postgresDB.GetRedisConfig()
+	if err != nil {
+		return fmt.Errorf("获取Redis连接字符串失败: %v", err)
+	}
+
+	// 创建Redis客户端
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return fmt.Errorf("解析Redis连接字符串失败: %v", err)
+	}
+
+	// 确保认证信息正确设置
+	// 如果连接字符串中包含用户名和密码，但ParseURL没有正确解析，手动设置
+	if opts.Password == "" && strings.Contains(redisURL, "@") {
+		fmt.Printf("原始Redis连接字符串: %s\n", redisURL)
+		fmt.Printf("ParseURL后的选项: Username=%s, Password=%s\n", opts.Username, opts.Password)
+
+		// 尝试从URL中提取认证信息
+		parts := strings.Split(redisURL, "@")
+		if len(parts) >= 2 {
+			protocolParts := strings.Split(parts[0], "://")
+			if len(protocolParts) >= 2 {
+				auth := protocolParts[1]
+				if strings.Contains(auth, ":") {
+					// 格式: username:password
+					credentials := strings.Split(auth, ":")
+					if len(credentials) == 2 {
+						opts.Username = credentials[0]
+						opts.Password = credentials[1]
+					}
+				} else {
+					// 格式: redis://username@host:port/db
+					// 在这种情况下，username就是密码
+					opts.Password = auth
+					fmt.Printf("设置密码为: %s\n", auth)
+				}
+			}
+		}
+	}
+
+	client := redis.NewClient(opts)
+	ctx := context.Background()
+
+	// 检查连接
+	_, err = client.Ping(ctx).Result()
+	if err != nil {
+		return fmt.Errorf("Redis连接测试失败: %v", err)
+	}
+	defer func(client *redis.Client) {
+		errClose := client.Close()
+		if errClose != nil {
+
+		}
+	}(client)
+
+	// 获取Redis队列名称
+	queueName := os.Getenv("REDIS_QUEUE")
+	if queueName == "" {
+		queueName = "amazon:scraper_task_results" // 默认队列名
+	}
+	fmt.Println("<UNK>Redis<UNK>:", queueName)
+	// 遍历产品并保存到Redis队列
+	for _, product := range products {
+		// 处理BeforePrice为null的情况
+		var beforePrice *float64
+		if product.Price.BeforePrice > 0 {
+			bp := product.Price.BeforePrice
+			beforePrice = &bp
+		}
+
+		// 创建Redis记录
+		redisProduct := MongoProduct{
+			Position: MongoPosition{
+				Page:           product.Position.Page,
+				Position:       product.Position.Position,
+				GlobalPosition: product.Position.GlobalPosition,
+			},
+			Price: MongoPrice{
+				Discounted:   product.Price.Discounted,
+				CurrentPrice: product.Price.CurrentPrice,
+				BeforePrice:  beforePrice,
+			},
+			Reviews: MongoReviews{
+				Rating:       product.Reviews.Rating,
+				TotalReviews: product.Reviews.TotalReviews,
+			},
+			AmazonPrime:  product.AmazonPrime,
+			Title:        product.Title,
+			CreatedAt:    time.Now(),
+			ASIN:         product.ASIN,
+			URL:          product.URL,
+			Sponsored:    product.Sponsored,
+			AmazonChoice: product.AmazonChoice,
+			BestSeller:   product.BestSeller,
+			Thumbnail:    product.Thumbnail,
+			TaskID:       taskID, // 添加任务ID
+		}
+
+		// 转换为JSON
+		jsonData, err := json.Marshal(redisProduct)
+		if err != nil {
+			return fmt.Errorf("转换产品数据为JSON失败: %v", err)
+		}
+
+		// 添加到Redis队列
+		err = client.RPush(ctx, queueName, jsonData).Err()
+		if err != nil {
+			return fmt.Errorf("添加数据到Redis队列失败: %v", err)
+		}
+	}
+
+	logs.Info("成功将%d条产品数据保存到Redis队列%s", len(products), queueName)
+	return nil
 }
