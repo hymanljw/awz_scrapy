@@ -499,7 +499,12 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			// 设置URL
 			amazonDomain := GetAmazonDomain(currentTaskCode)
 			if productURL != "" {
-				prodItem.URL = productURL
+				// 检查productURL是否包含完整域名，如果不包含则添加
+				if strings.HasPrefix(productURL, "/") {
+					prodItem.URL = fmt.Sprintf("https://www.%s%s", amazonDomain, productURL)
+				} else {
+					prodItem.URL = productURL
+				}
 			} else {
 				prodItem.URL = fmt.Sprintf("https://www.%s/dp/%s", amazonDomain, prodItem.ASIN)
 			}
