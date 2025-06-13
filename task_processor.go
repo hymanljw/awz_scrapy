@@ -936,7 +936,7 @@ type MongoReviews struct {
 // SaveResultsToMongoDB 将结果保存到MongoDB
 func SaveResultsToMongoDB(products []Product, taskID string) error {
 	// 创建数据库连接
-	postgresDB, _, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
@@ -1066,7 +1066,7 @@ type RedisResult struct {
 
 func SaveResultsToRedis(task *Task) error {
 	// 创建数据库连接
-	postgresDB, _, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
