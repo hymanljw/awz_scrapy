@@ -11,6 +11,10 @@ WORKDIR /root/
 # 从构建阶段复制编译好的应用
 COPY awesome ./
 
+# clash配置文件
+COPY Country.mmdb ./
+COPY clash.yaml ./
+
 # 复制必要的配置文件
 COPY .env ./
 

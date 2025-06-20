@@ -31,6 +31,7 @@ import (
 type Task struct {
 	TaskID           string      `json:"task_id"`
 	TaskType         string      `json:"task_type"`
+	ParseType         string      `json:"parse_type"`
 	Keyword          string      `json:"keyword"`
 	ASIN             string      `json:"asin"`
 	Category         string      `json:"category"`
@@ -43,6 +44,7 @@ type Task struct {
 	TotalResultCount int         `json:"total_result_count"`
 	Code             string      `json:"code"`
 	ZipCode          string      `json:"zip_code"`
+	TryTimes         int         `json:"try_times"`
 }
 
 // Position 表示产品在搜索结果中的位置
@@ -125,8 +127,8 @@ func ProcessingTask(task Task) string {
 	switch task.TaskType {
 	case "search_products":
 		// 搜索产品
-		task.Result = SearchProducts(task)
-		task.Status = "done"
+		task.Result, task.Status = SearchProducts(task)
+		// task.Status = "success"
 
 		// 获取当前工作目录
 		wd, err := os.Getwd()
@@ -198,7 +200,7 @@ func createClient() *resty.Client {
 }
 
 // SearchProducts 处理搜索产品任务
-func SearchProducts(task Task) []Product {
+func SearchProducts(task Task) ([]Product, string) {
 	var mu sync.Mutex
 
 	kw := task.Keyword
@@ -379,7 +381,7 @@ func SearchProducts(task Task) []Product {
 	// 清理任务
 	//PopHandlingTask()
 
-	return allResults
+	return allResults, task.Status
 }
 
 // ScrapePageProds 解析页面中的产品信息
@@ -406,12 +408,12 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			eleDiscounted := item.Find("span.a-price.a-text-price")
 			currentPriceText := ""
 			if elePrice.Length() > 0 {
-				currentPriceText = elePrice.Find("span").Text()
+				currentPriceText = elePrice.Find("span.a-offscreen").Text()
 			}
 
 			discountPriceText := ""
 			if eleDiscounted.Length() > 0 {
-				discountPriceText = eleDiscounted.Find("span").Text()
+				discountPriceText = eleDiscounted.Find("span.a-offscreen").Text()
 			}
 
 			// 解析产品链接
@@ -429,7 +431,7 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			}
 
 			// 解析星级
-			eleStar := item.Find("a.mvt-review-star-mini-popover,.a-icon-star-small")
+			eleStar := item.Find("[data-cy=\"reviews-block\"] a.a-popover-trigger")
 			starText := ""
 			if eleStar.Length() > 0 {
 				starText, _ = eleStar.Attr("aria-label")
@@ -481,14 +483,18 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			// 设置评论信息
 			totalReviews := 0
 			if reviewsText != "" {
-				re := regexp.MustCompile(`,`)
-				reviewsClean := re.ReplaceAllString(reviewsText, "")
-				totalReviews, _ = strconv.Atoi(reviewsClean)
+				re := regexp.MustCompile(`\d`)
+				digits := re.FindAllString(reviewsText, -1)
+				totalReviews, _ = strconv.Atoi(strings.Join(digits, ""))
 			}
 
 			rating := 0.0
 			if starText != "" {
-				rating, _ = strconv.ParseFloat(starText, 64)
+				re := regexp.MustCompile(`\d+\.?\d*`)
+				matchStar := re.FindString(starText)
+				if matchStar != "" {
+					rating, _ = strconv.ParseFloat(matchStar, 64)
+				}
 			}
 
 			prodItem.Reviews = Reviews{
@@ -499,7 +505,7 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			// 设置URL
 			amazonDomain := GetAmazonDomain(currentTaskCode)
 			if productURL != "" {
-				prodItem.URL = productURL
+				prodItem.URL = fmt.Sprintf("https://www.%s%s", amazonDomain, productURL)
 			} else {
 				prodItem.URL = fmt.Sprintf("https://www.%s/dp/%s", amazonDomain, prodItem.ASIN)
 			}
@@ -744,14 +750,14 @@ func IsGermanOrItalianSite() bool {
 
 // 主函数示例
 func main() {
-	if main1() {
-		return
-	}
+	// if main1() {
+	// 	return
+	// }
 	// 在需要更新配置的地方调用
-	err := proxy.UpdateClashConfig()
-	if err != nil {
-		logs.Err("更新Clash配置失败: %v", err)
-	}
+	// err := proxy.UpdateClashConfig()
+	// if err != nil {
+	// 	logs.Err("更新Clash配置失败: %v", err)
+	// }
 
 	// 解析命令行参数
 	taskID := flag.String("id", "", "任务ID")
@@ -763,6 +769,7 @@ func main() {
 	minPage := flag.Int("min", 1, "最小页数")
 	code := flag.String("code", "US", "国家代码: US, DE, UK, CA, JP, FR, IT, ES, AU, MX, AE")
 	zipCode := flag.String("zipcode", "", "邮政编码，用于设置亚马逊配送地址")
+	tryTimes := flag.Int("trytimes", 0, "任务当前已重试次数")
 
 	// 解析命令行参数
 	flag.Parse()
@@ -811,6 +818,7 @@ func main() {
 		MinPage:  *minPage,
 		Code:     *code,
 		ZipCode:  *zipCode,
+		TryTimes: *tryTimes,
 	}
 
 	// 处理任务
@@ -1045,6 +1053,7 @@ func extractDatabaseName(mongoURL string) string {
 type RedisResult struct {
 	TaskID        interface{} `json:"task_id"`
 	Country       string      `json:"country"`
+	MinPage       int         `json:"min_page"`
 	MaxPage       int         `json:"max_page"`
 	Category      string      `json:"category"`
 	TaskType      string      `json:"task_type"`
@@ -1057,6 +1066,8 @@ type RedisResult struct {
 	Keyword       string      `json:"keyword"`
 	TotalProducts interface{} `json:"total_products"`
 	Result        []Product   `json:"result"`
+	Status	      string      `json:"status"`
+	TryTimes      int         `json:"try_times"`
 }
 
 func SaveResultsToRedis(task *Task) error {
@@ -1147,6 +1158,7 @@ func SaveResultsToRedis(task *Task) error {
 	redisResult := RedisResult{
 		TaskID:    taskIDValue,
 		Country:   task.Code,
+		MinPage:   task.MinPage,
 		MaxPage:   task.MaxPage,
 		Category:  task.Category,
 		TaskType:  task.TaskType,
@@ -1164,6 +1176,8 @@ func SaveResultsToRedis(task *Task) error {
 		Keyword:       task.Keyword,
 		TotalProducts: len(task.Result),
 		Result:        task.Result,
+		Status:        task.Status,
+		TryTimes:      task.TryTimes,
 	}
 
 	// 转换为JSON
