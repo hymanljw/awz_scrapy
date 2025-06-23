@@ -83,6 +83,71 @@ func (db *PostgresDB) GetConvConfig() (string, error) {
 	return db.GetConfig("conv")
 }
 
+// TaskInfo 表示从keywords_scrapy_task表中查询到的任务信息
+type TaskInfo struct {
+	TaskID      string
+	TaskType    string
+	Keywords    string
+	Category    string
+	CountryCode string
+	PageNum     int
+	MinPage     int
+	Zipcode     string
+}
+
+// GetTaskByID 根据任务ID查询keywords_scrapy_task表中的任务信息
+func (db *PostgresDB) GetTaskByID(taskID string) (*TaskInfo, error) {
+	var taskInfo TaskInfo
+
+	// 执行查询
+	query := `SELECT task_id, task_type, keywords, category, country_code, page_num, min_page, zipcode 
+	         FROM keywords_scrapy_task 
+	         WHERE task_id = $1`
+	err := db.pool.QueryRow(context.Background(), query, taskID).Scan(
+		&taskInfo.TaskID,
+		&taskInfo.TaskType,
+		&taskInfo.Keywords,
+		&taskInfo.Category,
+		&taskInfo.CountryCode,
+		&taskInfo.PageNum,
+		&taskInfo.MinPage,
+		&taskInfo.Zipcode,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("查询任务信息失败: %v", err)
+	}
+
+	return &taskInfo, nil
+}
+
+// UpdateTaskSuccess 更新任务状态为已完成，并更新ASIN数量
+func (db *PostgresDB) UpdateTaskSuccess(taskID string, asinCount int) error {
+	// 执行更新
+	query := `UPDATE keywords_scrapy_task 
+	         SET status = '已完成', asin_num = $2, updated_at = CURRENT_TIMESTAMP 
+	         WHERE task_id = $1`
+	_, err := db.pool.Exec(context.Background(), query, taskID, asinCount)
+	if err != nil {
+		return fmt.Errorf("更新任务状态失败: %v", err)
+	}
+
+	return nil
+}
+
+// UpdateTaskFailed 更新任务状态为已失败，并记录错误信息
+func (db *PostgresDB) UpdateTaskFailed(taskID string, errMsg string) error {
+	// 执行更新
+	query := `UPDATE keywords_scrapy_task 
+	         SET status = '已失败', err_msg = $2, updated_at = CURRENT_TIMESTAMP 
+	         WHERE task_id = $1`
+	_, err := db.pool.Exec(context.Background(), query, taskID, errMsg)
+	if err != nil {
+		return fmt.Errorf("更新任务状态失败: %v", err)
+	}
+
+	return nil
+}
+
 // ExampleUsage 示例使用方法
 func ExampleUsage() {
 	// 创建数据库连接
