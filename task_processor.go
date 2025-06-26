@@ -240,7 +240,10 @@ func SearchProducts(task *Task) []Product {
 
 	// 创建HTTP客户端
 	client := createClient()
-
+	if client == nil {
+		fmt.Println("<UNK>代理连接失败，任务取消")
+		return nil
+	}
 	// 设置当前任务的code
 	currentTaskCode = task.Code
 	amazonDomain := GetAmazonDomain(currentTaskCode)
@@ -255,13 +258,13 @@ func SearchProducts(task *Task) []Product {
 	}
 
 	if zipCode != "" {
-		//err := SetAmazonZipCode(client, amazonDomain, zipCode)
-		//if err != nil {
-		//	logs.Warn("设置亚马逊邮编失败:", err)
-		//	// 即使设置邮编失败，我们仍然继续爬取
-		//} else {
-		//	logs.Info("成功设置亚马逊邮编:", zipCode)
-		//}
+		err := SetAmazonZipCode(client, amazonDomain, zipCode)
+		if err != nil {
+			logs.Warn("设置亚马逊邮编失败:", err)
+			// 即使设置邮编失败，我们仍然继续爬取
+		} else {
+			logs.Info("成功设置亚马逊邮编:", zipCode)
+		}
 		//return nil
 	}
 
@@ -270,9 +273,9 @@ func SearchProducts(task *Task) []Product {
 
 	// 构建初始URL - 只请求第一页
 	kwSearchURL := fmt.Sprintf("https://www.%s/s?k=%s", amazonDomain, url.QueryEscape(kw))
-	//if task.Category != "" {
-	//	kwSearchURL += "&i=" + task.Category
-	//}
+	if task.Category != "" {
+		kwSearchURL += "&C" + task.Category
+	}
 
 	pageCount := 0
 
@@ -781,9 +784,13 @@ func main() {
 	//	return
 	//}
 	// 在需要更新配置的地方调用
-	err := proxy.UpdateClashConfig()
-	if err != nil {
-		logs.Err("更新Clash配置失败: %v", err)
+	nUp := os.Getenv("NEED_UPDATE")
+	if nUp == "true" {
+		err := proxy.UpdateClashConfig()
+		if err != nil {
+			logs.Err("更新Clash配置失败: %v", err)
+			return
+		}
 	}
 
 	// 解析命令行参数，现在只需要任务ID
@@ -791,7 +798,7 @@ func main() {
 
 	// 解析命令行参数
 	flag.Parse()
-	//*taskID = "9efea159-82f8-44c3-9119-f41d7c2bdefb"
+	*taskID = "a08ba339-f94f-437d-ae8b-9aa28b643ae7"
 	// 验证必要参数
 	if *taskID == "" {
 		fmt.Println("错误: 必须提供任务ID (--id)")
@@ -828,39 +835,57 @@ func main() {
 	// 记录任务整体执行状态
 	overallResult := "done"
 
-	// 对每个关键词执行一次采集任务
+	// 使用WaitGroup等待所有协程完成
+	var wg sync.WaitGroup
+	// 使用互斥锁保护共享资源
+	var mu sync.Mutex
+
+	// 对每个关键词并发执行采集任务
 	for _, keyword := range keywords {
-		fmt.Printf("开始处理关键词: %s\n", keyword)
+		// 为每个关键词启动一个协程
+		wg.Add(1)
+		go func(kw string) {
+			defer wg.Done()
 
-		// 创建单个关键词的任务
-		task := Task{
-			TaskID:   *taskID,
-			TaskType: taskInfo.TaskType,
-			Keyword:  keyword, // 使用当前关键词
-			Category: taskInfo.Category,
-			MaxPage:  taskInfo.PageNum,
-			MinPage:  taskInfo.MinPage,
-			Code:     taskInfo.CountryCode,
-			ZipCode:  taskInfo.Zipcode,
-		}
+			fmt.Printf("开始处理关键词: %s\n", kw)
 
-		// 处理任务
-		result := ProcessingTask(&task)
-		fmt.Printf("关键词 '%s' 处理结果: %s\n", keyword, result)
-
-		// 如果任务成功完成，将结果添加到总结果中
-		if result == "done" && task.TaskType == "search_products" {
-			if len(task.Result) > 0 {
-				fmt.Printf("关键词 '%s' 找到 %d 个产品\n", keyword, len(task.Result))
-				allResults = append(allResults, task.Result...)
-			} else {
-				fmt.Printf("警告: 关键词 '%s' 处理成功但没有找到产品\n", keyword)
+			// 创建单个关键词的任务
+			task := Task{
+				TaskID:   *taskID,
+				TaskType: taskInfo.TaskType,
+				Keyword:  kw, // 使用当前关键词
+				Category: taskInfo.Category,
+				MaxPage:  taskInfo.PageNum,
+				MinPage:  taskInfo.MinPage,
+				Code:     taskInfo.CountryCode,
+				ZipCode:  taskInfo.Zipcode,
 			}
-		} else if result != "done" {
-			// 如果有任何一个关键词处理失败，记录整体状态为失败
-			overallResult = "failed"
-		}
+
+			// 处理任务
+			result := ProcessingTask(&task)
+			fmt.Printf("关键词 '%s' 处理结果: %s\n", kw, result)
+
+			// 使用互斥锁保护共享资源的访问
+			mu.Lock()
+			defer mu.Unlock()
+
+			// 如果任务成功完成，将结果添加到总结果中
+			if result == "done" && task.TaskType == "search_products" {
+				if len(task.Result) > 0 {
+					fmt.Printf("关键词 '%s' 找到 %d 个产品\n", kw, len(task.Result))
+					allResults = append(allResults, task.Result...)
+				} else {
+					fmt.Printf("警告: 关键词 '%s' 处理成功但没有找到产品\n", kw)
+				}
+			} else if result != "done" {
+				// 如果有任何一个关键词处理失败，记录整体状态为失败
+				overallResult = "failed"
+			}
+		}(keyword) // 立即传入当前关键词值
 	}
+
+	// 等待所有协程完成
+	wg.Wait()
 
 	// 根据任务执行结果更新任务状态
 	fmt.Println(overallResult)
