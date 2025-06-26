@@ -121,23 +121,37 @@ var (
 )
 
 // ProcessingTask 处理任务的主函数
-func ProcessingTask(task Task) string {
+func ProcessingTask(task *Task) string {
+	defer func() {
+		// 捕获任务执行过程中的panic
+		if r := recover(); r != nil {
+			fmt.Printf("任务执行过程中发生panic: %v\n", r)
+			task.Status = "failed"
+		}
+	}()
+
 	switch task.TaskType {
 	case "search_products":
 		// 搜索产品
 		task.Result = SearchProducts(task)
+		if len(task.Result) == 0 {
+			// 如果没有搜索到产品，返回失败状态
+			return "failed"
+		}
 		task.Status = "done"
 
 		// 获取当前工作目录
 		wd, err := os.Getwd()
 		if err != nil {
-			return "获取工作目录失败"
+			fmt.Printf("获取工作目录失败: %v\n", err)
+			return "failed"
 		}
 		// 加载.env文件
 		envPath := filepath.Join(wd, ".env")
 		err = godotenv.Load(envPath)
 		if err != nil {
-			return "加载.env文件失败"
+			fmt.Printf("加载.env文件失败: %v\n", err)
+			return "failed"
 		}
 
 		// 根据环境变量决定保存结果的方式
@@ -145,26 +159,34 @@ func ProcessingTask(task Task) string {
 		fmt.Println("根据环境变量决定保存结果的方式" + resultType)
 		if resultType == "redis" {
 			// 保存结果到Redis队列
-			err1 := SaveResultsToRedis(&task)
+			err1 := SaveResultsToRedis(task)
 			if err1 != nil {
 				logs.Err("保存结果到Redis失败: %v", err1)
+				// 保存结果失败不影响任务状态
 			}
 		} else if resultType == "mongo" || resultType == "" {
 			// 保存结果到MongoDB
 			err2 := SaveResultsToMongoDB(task.Result, task.TaskID)
 			if err2 != nil {
 				logs.Err("保存结果到MongoDB失败: %v", err2)
+				// 保存结果失败不影响任务状态
 			}
 		}
 
 	case "asin_page":
 		// 处理ASIN页面
 		task.Status = ASINPage(task)
+		if task.Status == "" {
+			return "failed"
+		}
 	case "keyword_appear":
 		// 检查关键词出现
 		task.Status = KeywordAppear(task)
+		if task.Status == "" {
+			return "failed"
+		}
 	default:
-		return ""
+		return "failed"
 	}
 	return task.Status
 }
@@ -198,7 +220,7 @@ func createClient() *resty.Client {
 }
 
 // SearchProducts 处理搜索产品任务
-func SearchProducts(task Task) []Product {
+func SearchProducts(task *Task) []Product {
 	var mu sync.Mutex
 
 	kw := task.Keyword
@@ -218,7 +240,10 @@ func SearchProducts(task Task) []Product {
 
 	// 创建HTTP客户端
 	client := createClient()
-
+	if client == nil {
+		fmt.Println("<UNK>代理连接失败，任务取消")
+		return nil
+	}
 	// 设置当前任务的code
 	currentTaskCode = task.Code
 	amazonDomain := GetAmazonDomain(currentTaskCode)
@@ -240,6 +265,7 @@ func SearchProducts(task Task) []Product {
 		} else {
 			logs.Info("成功设置亚马逊邮编:", zipCode)
 		}
+		//return nil
 	}
 
 	allResults := []Product{}
@@ -248,7 +274,7 @@ func SearchProducts(task Task) []Product {
 	// 构建初始URL - 只请求第一页
 	kwSearchURL := fmt.Sprintf("https://www.%s/s?k=%s", amazonDomain, url.QueryEscape(kw))
 	if task.Category != "" {
-		kwSearchURL += "&i=" + task.Category
+		kwSearchURL += "&C" + task.Category
 	}
 
 	pageCount := 0
@@ -357,10 +383,11 @@ func SearchProducts(task Task) []Product {
 	// 更新任务状态
 	task.Result = allResults
 	if len(allResults) > 0 {
-		fmt.Println(allResults)
+		fmt.Println("找到产品数量:", len(allResults))
 		task.Status = "success"
 	} else {
 		task.Status = "error"
+		logs.Err("搜索产品失败，未找到任何产品")
 	}
 
 	log.Printf("<%s> ======  task keyword: %s is complete, max_page: %d, total result length: %d, status: %s  ======",
@@ -499,7 +526,12 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			// 设置URL
 			amazonDomain := GetAmazonDomain(currentTaskCode)
 			if productURL != "" {
-				prodItem.URL = productURL
+				// 检查productURL是否包含完整域名，如果不包含则添加
+				if strings.HasPrefix(productURL, "/") {
+					prodItem.URL = fmt.Sprintf("https://www.%s%s", amazonDomain, productURL)
+				} else {
+					prodItem.URL = productURL
+				}
 			} else {
 				prodItem.URL = fmt.Sprintf("https://www.%s/dp/%s", amazonDomain, prodItem.ASIN)
 			}
@@ -515,8 +547,12 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 			if eleTitle.Length() == 0 {
 				eleTitle = item.Find("[data-cy=\"title-recipe\"] h2.a-size-base-plus span")
 			}
+			if eleTitle.Length() == 0 {
+				eleTitle = item.Find("[data-cy=\"title-recipe\"] h2.a-size-medium span")
+			}
 			if eleTitle.Length() > 0 {
 				prodItem.Title = eleTitle.Text()
+				fmt.Println(prodItem.Title)
 			}
 
 			// 设置缩略图
@@ -541,7 +577,7 @@ func ScrapePageProds(doc *goquery.Document, page int) []Product {
 }
 
 // ASINPage 处理ASIN页面任务
-func ASINPage(task Task) string {
+func ASINPage(task *Task) string {
 	// 添加到处理中的任务
 	handlingTasksLock.Lock()
 	handlingTasks = append(handlingTasks, fmt.Sprintf("%s_%s", task.TaskID, task.ASIN))
@@ -629,7 +665,7 @@ func ASINPage(task Task) string {
 }
 
 // KeywordAppear 处理关键词出现任务
-func KeywordAppear(task Task) string {
+func KeywordAppear(task *Task) string {
 	// 添加到处理中的任务
 	handlingTasksLock.Lock()
 	handlingTasks = append(handlingTasks, fmt.Sprintf("%s_%s_%s", task.TaskID, task.Keyword, task.ASIN))
@@ -744,29 +780,25 @@ func IsGermanOrItalianSite() bool {
 
 // 主函数示例
 func main() {
-	if main1() {
-		return
-	}
+	//if main1() {
+	//	return
+	//}
 	// 在需要更新配置的地方调用
-	err := proxy.UpdateClashConfig()
-	if err != nil {
-		logs.Err("更新Clash配置失败: %v", err)
+	nUp := os.Getenv("NEED_UPDATE")
+	if nUp == "true" {
+		err := proxy.UpdateClashConfig()
+		if err != nil {
+			logs.Err("更新Clash配置失败: %v", err)
+			return
+		}
 	}
 
-	// 解析命令行参数
+	// 解析命令行参数，现在只需要任务ID
 	taskID := flag.String("id", "", "任务ID")
-	taskType := flag.String("type", "", "任务类型: search_products, asin_page, keyword_appear")
-	keyword := flag.String("keyword", "", "搜索关键词")
-	asin := flag.String("asin", "", "产品ASIN")
-	category := flag.String("category", "", "产品类别")
-	maxPage := flag.Int("max", 1, "最大页数")
-	minPage := flag.Int("min", 1, "最小页数")
-	code := flag.String("code", "US", "国家代码: US, DE, UK, CA, JP, FR, IT, ES, AU, MX, AE")
-	zipCode := flag.String("zipcode", "", "邮政编码，用于设置亚马逊配送地址")
 
 	// 解析命令行参数
 	flag.Parse()
-
+	*taskID = "a08ba339-f94f-437d-ae8b-9aa28b643ae7"
 	// 验证必要参数
 	if *taskID == "" {
 		fmt.Println("错误: 必须提供任务ID (--id)")
@@ -774,66 +806,155 @@ func main() {
 		return
 	}
 
-	// 根据任务类型验证参数
-	switch *taskType {
-	case "search_products":
-		if *keyword == "" {
-			fmt.Println("错误: search_products 任务必须提供关键词 (--keyword)")
-			flag.Usage()
-			return
-		}
-	case "asin_page":
-		if *asin == "" {
-			fmt.Println("错误: asin_page 任务必须提供ASIN (--asin)")
-			flag.Usage()
-			return
-		}
-	case "keyword_appear":
-		if *keyword == "" || *asin == "" {
-			fmt.Println("错误: keyword_appear 任务必须提供关键词 (--keyword) 和 ASIN (--asin)")
-			flag.Usage()
-			return
-		}
-	default:
-		fmt.Printf("错误: 不支持的任务类型: %s\n", *taskType)
-		flag.Usage()
+	// 创建数据库连接
+	postgresDB, err := db.NewPostgresDB()
+	if err != nil {
+		fmt.Printf("创建数据库连接失败: %v\n", err)
+		return
+	}
+	defer postgresDB.Close()
+
+	// 从数据库获取任务信息
+	taskInfo, err := postgresDB.GetTaskByID(*taskID)
+	if err != nil {
+		fmt.Printf("获取任务信息失败: %v\n", err)
 		return
 	}
 
-	// 创建任务
-	task := Task{
-		TaskID:   *taskID,
-		TaskType: *taskType,
-		Keyword:  *keyword,
-		ASIN:     *asin,
-		Category: *category,
-		MaxPage:  *maxPage,
-		MinPage:  *minPage,
-		Code:     *code,
-		ZipCode:  *zipCode,
+	// 拆分关键词（以逗号分隔）
+	keywords := strings.Split(taskInfo.Keywords, ",")
+	// 去除关键词前后的空格
+	for i := range keywords {
+		keywords[i] = strings.TrimSpace(keywords[i])
 	}
 
-	// 处理任务
-	result := ProcessingTask(task)
-	fmt.Println("Task result:", result)
+	fmt.Printf("任务包含 %d 个关键词: %v\n", len(keywords), keywords)
+
+	// 用于存储所有关键词的结果
+	allResults := []Product{}
+	// 记录任务整体执行状态
+	overallResult := "done"
+
+	// 使用WaitGroup等待所有协程完成
+	var wg sync.WaitGroup
+	// 使用互斥锁保护共享资源
+	var mu sync.Mutex
+
+	// 对每个关键词并发执行采集任务
+	for _, keyword := range keywords {
+		// 为每个关键词启动一个协程
+		wg.Add(1)
+		go func(kw string) {
+			defer wg.Done()
+
+			fmt.Printf("开始处理关键词: %s\n", kw)
+
+			// 创建单个关键词的任务
+			task := Task{
+				TaskID:   *taskID,
+				TaskType: taskInfo.TaskType,
+				Keyword:  kw, // 使用当前关键词
+				Category: taskInfo.Category,
+				MaxPage:  taskInfo.PageNum,
+				MinPage:  taskInfo.MinPage,
+				Code:     taskInfo.CountryCode,
+				ZipCode:  taskInfo.Zipcode,
+			}
+
+			// 处理任务
+			result := ProcessingTask(&task)
+			fmt.Printf("关键词 '%s' 处理结果: %s\n", kw, result)
+
+			// 使用互斥锁保护共享资源的访问
+			mu.Lock()
+			defer mu.Unlock()
+
+			// 如果任务成功完成，将结果添加到总结果中
+			if result == "done" && task.TaskType == "search_products" {
+				if len(task.Result) > 0 {
+					fmt.Printf("关键词 '%s' 找到 %d 个产品\n", kw, len(task.Result))
+					allResults = append(allResults, task.Result...)
+				} else {
+					fmt.Printf("警告: 关键词 '%s' 处理成功但没有找到产品\n", kw)
+				}
+			} else if result != "done" {
+				// 如果有任何一个关键词处理失败，记录整体状态为失败
+				overallResult = "failed"
+			}
+		}(keyword) // 立即传入当前关键词值
+	}
+
+	// 等待所有协程完成
+	wg.Wait()
+
+	// 根据任务执行结果更新任务状态
+	fmt.Println(overallResult)
+	if overallResult == "done" {
+		fmt.Println(taskInfo)
+		fmt.Println(taskInfo.TaskType)
+		// 如果所有关键词任务都成功完成
+		if taskInfo.TaskType == "search_products" {
+			// 统计不重复的ASIN值总数
+			asinMap := make(map[string]bool)
+			fmt.Printf("总共收集到 %d 个产品结果\n", len(allResults))
+
+			if len(allResults) > 0 {
+				for _, product := range allResults {
+					if product.ASIN != "" {
+						asinMap[product.ASIN] = true
+					}
+				}
+			}
+			asinCount := len(asinMap)
+
+			fmt.Printf("所有关键词处理完成，共找到 %d 个不重复的ASIN\n", asinCount)
+
+			// 更新任务状态为已完成
+			updateErr := postgresDB.UpdateTaskSuccess(*taskID, asinCount)
+			if updateErr != nil {
+				fmt.Printf("更新任务状态失败: %v\n", updateErr)
+			} else {
+				fmt.Printf("任务执行成功，共找到 %d 个不重复的ASIN\n", asinCount)
+			}
+		} else {
+			// 其他类型的任务成功完成
+			updateErr := postgresDB.UpdateTaskSuccess(*taskID, 0)
+			if updateErr != nil {
+				fmt.Printf("更新任务状态失败: %v\n", updateErr)
+			} else {
+				fmt.Println("任务执行成功")
+			}
+		}
+	} else {
+		// 如果任务执行失败
+		errMsg := fmt.Sprintf("任务执行失败，有 %d 个关键词处理失败", len(keywords)-len(allResults))
+
+		updateErr := postgresDB.UpdateTaskFailed(*taskID, errMsg)
+		if updateErr != nil {
+			fmt.Printf("更新任务状态失败: %v\n", updateErr)
+		} else {
+			fmt.Println(errMsg)
+		}
+	}
 }
 func main1() bool {
-	//err := proxy.UpdateClashConfig()
-	//if err != nil {
-	//	logs.Err("更新Clash配置失败: %v", err)
-	//}
+	err := proxy.UpdateClashConfig()
+	if err != nil {
+		logs.Err("更新Clash配置失败: %v", err)
+	}
 	task := Task{
-		TaskID:   "task123",
+		TaskID:   "1f648680-7f25-46b5-b24d-8b92544c81ab",
 		TaskType: "search_products",
-		Keyword:  "wireless headphones",
+		Keyword:  "Romoss,Anker",
 		MaxPage:  1,
 		MinPage:  1,
 		Code:     "US",
 		Category: "aps",
 	}
+	fmt.Println(task)
 	// 处理任务
-	result := ProcessingTask(task)
-	fmt.Println("Task result:", result)
+	//result := ProcessingTask(task)
+	//fmt.Println("Task result:", result)
 	return true
 }
 
@@ -860,10 +981,10 @@ func SetAmazonZipCode(client *resty.Client, amazonDomain string, zipCode string)
 	}
 
 	// 构建地址更改URL
-	addressChangeURL := fmt.Sprintf("https://www.%s/gp/delivery/ajax/address-change.html", amazonDomain)
-
-	// 构建表单数据
-	formData := map[string]string{
+	addressChangeURL := fmt.Sprintf("https://www.%s/portal-migration/hz/glow/address-change?actionSource=glow", amazonDomain)
+	fmt.Println(addressChangeURL)
+	// 构建JSON数据
+	jsonData := map[string]string{
 		"locationType": "LOCATION_INPUT",
 		"zipCode":      zipCode,
 		"storeContext": "generic",
@@ -874,10 +995,12 @@ func SetAmazonZipCode(client *resty.Client, amazonDomain string, zipCode string)
 
 	// 发送POST请求设置邮编
 	resp, err := client.R().
-		SetFormData(formData).
-		SetHeader("Content-Type", "application/x-www-form-urlencoded").
+		SetBody(jsonData).
+		SetHeader("Content-Type", "application/json").
 		SetHeader("Accept", "text/html,*/*").
 		SetHeader("X-Requested-With", "XMLHttpRequest").
+		//SetHeader("anti-csrftoken-a2z", "hNFyXCk7RAja5gwyYyQZoKnVflZdKyaqLIsTwXNvW/kQAAAAAGhX2LUAAAAB").
+		SetHeader("Cookie", "session-id=145-6834662-5711967; session-id-time=2082787201l; i18n-prefs=USD; lc-main=en_US; skin=noskin; ubid-main=133-6157528-6983024; session-token=2kGZ5xtLQxTAZuqJqHddHi3XuJlWQHTwk+Fa0G+bAfomBGXUlo/Dj015/w2TTawlG917fZK4M0vAKZBNeg3l7bTlljlqwFt1+tIrHXmIRxgTWGoOA5rPufarnFsRIiy6yD8CxKViwk8YVCjWb/IGmkbR4vsVMzW/4KbJ+X9qVwKW4eYpBOubKq7c14GiFMmV8/cxU/JmyDvXfX2jk9HsAS6yjYzJuAa7JTyZCjVUjPst4VQpUZqiJ+6yjU6GEspBg2LxQa06vVpwATosBiOKS1gcBQdZuasHkGwhzSTMnWwsBcU8kbkZ3WLrbocmaRdtEmoxiMaGaGOJAFaLTSk3qSpLXEl52lwG; csm-hit=tb:MS7P5C4KZ0YXJJHSYM2G+s-2X1MXHSSYZD8D8E43SZ6|1750587573591&t:1750587573591&adb:adblk_no; rxc=AK0kDNBWRqooeGAg6Fo").
 		Post(addressChangeURL)
 
 	if err != nil {
@@ -887,7 +1010,7 @@ func SetAmazonZipCode(client *resty.Client, amazonDomain string, zipCode string)
 	if resp.StatusCode() != 200 {
 		return fmt.Errorf("设置邮编请求返回非200状态码: %d", resp.StatusCode())
 	}
-
+	fmt.Println(resp.StatusCode())
 	return nil
 }
 
@@ -931,7 +1054,7 @@ type MongoReviews struct {
 // SaveResultsToMongoDB 将结果保存到MongoDB
 func SaveResultsToMongoDB(products []Product, taskID string) error {
 	// 创建数据库连接
-	postgresDB, _, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
@@ -1061,7 +1184,7 @@ type RedisResult struct {
 
 func SaveResultsToRedis(task *Task) error {
 	// 创建数据库连接
-	postgresDB, _, err := db.NewPostgresDB()
+	postgresDB, err := db.NewPostgresDB()
 	if err != nil {
 		return fmt.Errorf("创建数据库连接失败: %v", err)
 	}
